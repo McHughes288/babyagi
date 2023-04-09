@@ -7,6 +7,7 @@ from typing import Dict, List
 
 import openai
 import pinecone
+import numpy as np
 from dotenv import load_dotenv
 
 # Load default environment variables (.env)
@@ -29,7 +30,6 @@ if "gpt-4" in OPENAI_API_MODEL.lower():
     )
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
-assert PINECONE_API_KEY, "PINECONE_API_KEY environment variable is missing from .env"
 
 PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "")
 assert (
@@ -81,20 +81,64 @@ print("\033[93m\033[1m" + "\nInitial task:" + "\033[0m\033[0m" + f" {INITIAL_TAS
 
 # Configure OpenAI and Pinecone
 openai.api_key = OPENAI_API_KEY
-pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENVIRONMENT)
 
-# Create Pinecone index
-table_name = YOUR_TABLE_NAME
-dimension = 1536
-metric = "cosine"
-pod_type = "p1"
-if table_name not in pinecone.list_indexes():
-    pinecone.create_index(
-        table_name, dimension=dimension, metric=metric, pod_type=pod_type
-    )
+class DataStore:
+    def __init__(self, data=[], embedding_engine="text-embedding-ada-002"):
+        self._embedding_engine = embedding_engine
+        self._embeddings = {}
+        self.load_data(data)
 
-# Connect to the index
-index = pinecone.Index(table_name)
+    def load_data(self, data=[]):
+        self._data = data
+    
+    def upsert(self, id, task, result):
+        embedding = self.create_embedding(result)
+        self._data.append({
+            "id": id,
+            "task": task,
+            "result": result,
+            "embedding": embedding
+        })
+
+    def create_embedding(self, input_str):
+        if input_str in self._embeddings:
+            return self._embeddings[input_str]
+        else:
+            embedding = get_ada_embedding(input_str)
+            self._embeddings[input_str] = embedding
+            return embedding
+
+    def query(self, query, top_k=2):
+        query_embedding = self.create_embedding(query)
+        similarities = []
+        for item in self._data:
+            item_embedding = item["embedding"]
+            similarity = np.dot(query_embedding, item_embedding) / (
+                np.linalg.norm(query_embedding) * np.linalg.norm(item_embedding)
+            )
+            similarities.append((item, similarity))
+
+        sorted_results = sorted(similarities, key=lambda x: x[1], reverse=True)
+        return [result[0]["result"] for result in sorted_results[:top_k]], sorted_results
+
+if PINECONE_API_KEY:
+    pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENVIRONMENT)
+
+    # Create Pinecone index
+    table_name = YOUR_TABLE_NAME
+    dimension = 1536
+    metric = "cosine"
+    pod_type = "p1"
+    if table_name not in pinecone.list_indexes():
+        pinecone.create_index(
+            table_name, dimension=dimension, metric=metric, pod_type=pod_type
+        )
+
+    # Connect to the index
+    index = pinecone.Index(table_name)
+else:
+    print("PINECONE_API_KEY environment variable is missing from .env, using local datastore instead")
+    index = DataStore()
 
 # Task list
 task_list = deque([])
@@ -195,8 +239,8 @@ def prioritization_agent(this_task_id: int):
 
 def execution_agent(objective: str, task: str) -> str:
     context = context_agent(query=objective, n=5)
-    # print("\n*******RELEVANT CONTEXT******\n")
-    # print(context)
+    print("\n*******RELEVANT CONTEXT******\n")
+    print(context)
     prompt = f"""
     You are an AI who performs one task based on the following objective: {objective}\n.
     Take into account these previously completed tasks: {context}\n.
@@ -205,13 +249,16 @@ def execution_agent(objective: str, task: str) -> str:
 
 
 def context_agent(query: str, n: int):
-    query_embedding = get_ada_embedding(query)
-    results = index.query(query_embedding, top_k=n, include_metadata=True, namespace=OBJECTIVE)
-    # print("***** RESULTS *****")
-    # print(results)
-    sorted_results = sorted(results.matches, key=lambda x: x.score, reverse=True)
-    return [(str(item.metadata["task"])) for item in sorted_results]
-
+    if isinstance(index, DataStore):
+        context, _ = index.query(query, top_k=n)
+    else:
+        query_embedding = get_ada_embedding(query)
+        results = index.query(query_embedding, top_k=n, include_metadata=True, namespace=OBJECTIVE)
+        # print("***** RESULTS *****")
+        # print(results)
+        sorted_results = sorted(results.matches, key=lambda x: x.score, reverse=True)
+        context = [(str(item.metadata["task"])) for item in sorted_results]
+    return context 
 
 # Add the first task
 first_task = {"task_id": 1, "task_name": INITIAL_TASK}
@@ -242,13 +289,16 @@ while True:
             "data": result
         }  # This is where you should enrich the result if needed
         result_id = f"result_{task['task_id']}"
-        vector = get_ada_embedding(
-            enriched_result["data"]
-        )  # get vector of the actual result extracted from the dictionary
-        index.upsert(
-            [(result_id, vector, {"task": task["task_name"], "result": result})],
-	    namespace=OBJECTIVE
-        )
+        if isinstance(index, DataStore):
+            index.upsert(result_id, task["task_name"], result)
+        else:
+            vector = get_ada_embedding(
+                enriched_result["data"]
+            )  # get vector of the actual result extracted from the dictionary
+            index.upsert(
+                [(result_id, vector, {"task": task["task_name"], "result": result})],
+            namespace=OBJECTIVE
+            )
 
         # Step 3: Create new tasks and reprioritize task list
         new_tasks = task_creation_agent(
