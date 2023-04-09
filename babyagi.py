@@ -2,6 +2,7 @@
 import os
 import subprocess
 import time
+import re
 from collections import deque
 from typing import Dict, List
 
@@ -55,6 +56,8 @@ if ENABLE_COMMAND_LINE_ARGS:
     from extensions.argparseext import parse_arguments
 
     OBJECTIVE, INITIAL_TASK, OPENAI_API_MODEL, DOTENV_EXTENSIONS = parse_arguments()
+
+VERBOSE = os.getenv("VERBOSE", "")
 
 # Load additional environment variables for enabled extensions
 if DOTENV_EXTENSIONS:
@@ -142,6 +145,7 @@ else:
 
 # Task list
 task_list = deque([])
+task_id_counter = 0
 
 
 def add_task(task: Dict):
@@ -153,6 +157,18 @@ def get_ada_embedding(text):
     return openai.Embedding.create(input=[text], model="text-embedding-ada-002")[
         "data"
     ][0]["embedding"]
+
+def add_tasks(result):
+    global task_id_counter
+    new_tasks = result.split("\n")
+    for task_name in new_tasks:
+        match = re.match(r"^\d+\.", task_name) # enumerated task
+        if match:
+            task_name = task_name.strip().split(".", 1)
+            task_name = task_name[1].strip()
+        if len(task_name) > 5: # must be more than 5 chars
+            task_id_counter += 1
+            add_task({"task_id": task_id_counter, "task_name": task_name})
 
 
 def openai_call(
@@ -209,43 +225,44 @@ def task_creation_agent(
     The last completed task has the result: {result}.
     This result was based on this task description: {task_description}. These are incomplete tasks: {', '.join(task_list)}.
     Based on the result, create new tasks to be completed by the AI system that do not overlap with incomplete tasks.
-    Return the tasks as an array."""
+    Return the tasks as a numbered list.\n"""
     response = openai_call(prompt)
-    new_tasks = response.split("\n") if "\n" in response else [response]
-    return [{"task_name": task_name} for task_name in new_tasks]
+    if VERBOSE:
+        print(prompt, response)
+    add_tasks(response)
 
 
-def prioritization_agent(this_task_id: int):
+def prioritization_agent():
     global task_list
-    task_names = [t["task_name"] for t in task_list]
-    next_task_id = int(this_task_id) + 1
+    task_names = [f"{i+1}. {t['task_name']}" for i, t in enumerate(task_list)]
+    task_names = "\n".join(task_names)
     prompt = f"""
     You are an task prioritization AI tasked with cleaning the formatting of and reprioritizing the following tasks: {task_names}.
     Consider the ultimate objective of your team:{OBJECTIVE}.
-    Do not remove any tasks. Return the result as a numbered list, like:
-    #. First task
-    #. Second task
-    Start the task list with number {next_task_id}."""
+    Do not remove any tasks. Return the new order of indicies separated by commas where the first is the highest priority.\n"""
     response = openai_call(prompt)
-    new_tasks = response.split("\n")
-    task_list = deque()
-    for task_string in new_tasks:
-        task_parts = task_string.strip().split(".", 1)
-        if len(task_parts) == 2:
-            task_id = task_parts[0].strip()
-            task_name = task_parts[1].strip()
-            task_list.append({"task_id": task_id, "task_name": task_name})
+    if VERBOSE:
+        print(prompt, response)
+    reorder = [int(x) for x in response.strip().split(", ")]
+    
+    task_names_reordered = []
+    for i in reorder:
+        task_names_reordered.append(task_list[i-1])
+    task_list = deque(task_names_reordered)
 
 
 def execution_agent(objective: str, task: str) -> str:
     context = context_agent(query=objective, n=5)
-    print("\n*******RELEVANT CONTEXT******\n")
-    print(context)
+    # print("\n*******RELEVANT CONTEXT******\n")
+    # print(context)
     prompt = f"""
     You are an AI who performs one task based on the following objective: {objective}\n.
     Take into account these previously completed tasks: {context}\n.
     Your task: {task}\nResponse:"""
-    return openai_call(prompt, temperature=0.7, max_tokens=2000)
+    response = openai_call(prompt, temperature=0.7, max_tokens=2000)
+    if VERBOSE:
+        print(prompt, response)
+    return response
 
 
 def context_agent(query: str, n: int):
@@ -263,9 +280,11 @@ def context_agent(query: str, n: int):
 # Add the first task
 first_task = {"task_id": 1, "task_name": INITIAL_TASK}
 
-add_task(first_task)
+result = execution_agent(OBJECTIVE, first_task["task_name"])
+print("\033[93m\033[1m" + "\n*****INITIAL TASKS*****\n" + "\033[0m\033[0m")
+print(result)
+add_tasks(result)
 # Main loop
-task_id_counter = 1
 while True:
     if task_list:
         # Print the task list
@@ -301,17 +320,12 @@ while True:
             )
 
         # Step 3: Create new tasks and reprioritize task list
-        new_tasks = task_creation_agent(
+        task_creation_agent(
             OBJECTIVE,
             enriched_result,
             task["task_name"],
             [t["task_name"] for t in task_list],
         )
-
-        for new_task in new_tasks:
-            task_id_counter += 1
-            new_task.update({"task_id": task_id_counter})
-            add_task(new_task)
-        prioritization_agent(this_task_id)
+        prioritization_agent()
 
     time.sleep(1)  # Sleep before checking the task list again
