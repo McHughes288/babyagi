@@ -3,29 +3,24 @@ import dash_cytoscape as cyto
 from graphviz import Digraph
 
 class Node:
-    def __init__(self, task_id, task_name, result=None, related=None, children=None):
+    def __init__(self, task_id, task_name, result=None, state=None, related=None, children=None):
         self.task_id = int(task_id)
         self.task_name = task_name
         self.result = result
+        self.state = state
         self.related = related or []
         self.children = children or []
 
 def unpack_tree(root):
-    data = []
+    tasks = []
 
     def serach_node(node):
-        if node.embedding:
-            data.append(
-                {
-                    "task": node.task,
-                    "result": node.result,
-                }
-            )
+        tasks.append(node)
         for child in node.children:
             serach_node(child)
 
     serach_node(root)
-    return data
+    return tasks
 
 
 def visualize_tree_simple(root):

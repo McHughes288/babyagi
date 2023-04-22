@@ -11,7 +11,8 @@ import pinecone
 from dotenv import load_dotenv
 
 from datastore import DataStore, get_ada_embedding
-from tree import Node
+from tree import Node, unpack_tree
+from utils import save_checkpoint, maybe_load_checkpoint
 
 # Load default environment variables (.env)
 load_dotenv()
@@ -60,6 +61,7 @@ if ENABLE_COMMAND_LINE_ARGS:
     OBJECTIVE, INITIAL_TASK, OPENAI_API_MODEL, DOTENV_EXTENSIONS = parse_arguments()
 
 VERBOSE = os.getenv("VERBOSE", "")
+CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "")
 
 # Load additional environment variables for enabled extensions
 if DOTENV_EXTENSIONS:
@@ -108,7 +110,7 @@ else:
 
 # Task list
 task_list = deque([])
-task_id_counter = 0
+task_id_counter = 1
 
 
 def add_tasks(tasks: List[Node]):
@@ -127,7 +129,7 @@ def parse_tasks(result):
             task_name = task_name[1].strip()
         if len(task_name) > 20: # must be more than 20 chars
             task_id_counter += 1
-            task_node = Node(task_id=task_id_counter, task_name=task_name)
+            task_node = Node(task_id=task_id_counter, task_name=task_name, state="new")
             tasks.append(task_node)
     return tasks
 
@@ -200,15 +202,22 @@ def prioritization_agent():
     prompt = f"""
     You are an task prioritization AI tasked with cleaning the formatting of and reprioritizing the following tasks: {task_names}.
     Consider the ultimate objective of your team:{OBJECTIVE}.
-    Do not remove any tasks. Return the new order of indicies separated by commas where the first is the highest priority.\n"""
+    Remove tasks if they are low impact. Return the new order of indicies separated by commas where the first is the highest priority.\n"""
     response = openai_call(prompt)
     if VERBOSE:
         print(prompt, response)
     reorder = [int(x) for x in response.strip().split(", ")]
     
+    to_remove = list(set(range(1,len(task_list)+1))-set(reorder))
+    for i in to_remove:
+        task = task_list[i-1]
+        task.state = "cancelled"
+
     task_names_reordered = []
     for i in reorder:
-        task_names_reordered.append(task_list[i-1])
+        task = task_list[i-1]
+        task.state = "queued"
+        task_names_reordered.append(task)
     task_list = deque(task_names_reordered)
 
 
@@ -217,8 +226,8 @@ def execution_agent(objective: str, task: str) -> str:
     # print("\n*******RELEVANT CONTEXT******\n")
     # print(context)
     prompt = f"""
-    You are an AI who performs one task based on the following objective: {objective}\n.
-    Take into account these previously completed tasks: {context}\n.
+    You are an AI who performs one task based on the following objective: {objective}.\n
+    Take into account these previously completed tasks: {context}.\n
     Your task: {task}\nResponse:"""
     response = openai_call(prompt, temperature=0.7, max_tokens=2000)
     if VERBOSE:
@@ -238,19 +247,32 @@ def context_agent(query: str, n: int):
         context = [(str(item.metadata["task"])) for item in sorted_results]
     return context 
 
-# Objective task
-objective_node = Node(task_id=0, task_name=OBJECTIVE)
+objective_node, embedded_data = maybe_load_checkpoint(CHECKPOINT_DIR)
+if embedded_data:
+    index.load_data(embedded_data)
 
-# Add the first task
-first_task = Node(task_id=1, task_name=INITIAL_TASK)
-objective_node.children = [first_task]
+if not objective_node:
+    # Objective task
+    objective_node = Node(task_id=0, task_name=OBJECTIVE, state="complete")
 
-first_task.result = execution_agent(OBJECTIVE, first_task.task_name)
-print("\033[93m\033[1m" + "\n*****INITIAL TASKS*****\n" + "\033[0m\033[0m")
-print(first_task.result)
-tasks = parse_tasks(first_task.result)
-add_tasks(tasks)
-first_task.children = tasks
+    # Add the first task
+    first_task = Node(task_id=1, task_name=INITIAL_TASK, state="queued")
+    objective_node.children = [first_task]
+
+    first_task.result = execution_agent(OBJECTIVE, first_task.task_name)
+    first_task.state = "complete"
+    print("\033[93m\033[1m" + "\n*****INITIAL TASKS*****\n" + "\033[0m\033[0m")
+    print(first_task.result)
+    tasks = parse_tasks(first_task.result)
+    add_tasks(tasks)
+    first_task.children = tasks
+else:
+    tasks = unpack_tree(objective_node)
+    task_list = deque([task for task in tasks if task.state == "queued"])
+    for task in tasks:
+        if task.task_id > task_id_counter:
+            task_id_counter = task.task_id
+
 # Main loop
 while True:
     if task_list:
@@ -266,6 +288,7 @@ while True:
 
         # Send to execution function to complete the task based on the context
         task.result = execution_agent(OBJECTIVE, task.task_name)
+        task.state = "complete"
         
         print("\033[93m\033[1m" + "\n*****TASK RESULT*****\n" + "\033[0m\033[0m")
         print(task.result)
@@ -286,5 +309,7 @@ while True:
         task.children = tasks
 
         prioritization_agent()
+
+        save_checkpoint(CHECKPOINT_DIR, objective_node, index._data)
 
     time.sleep(1)  # Sleep before checking the task list again
