@@ -10,7 +10,8 @@ import openai
 import pinecone
 from dotenv import load_dotenv
 
-from datastore import DataStore
+from datastore import DataStore, get_ada_embedding
+from tree import Node
 
 # Load default environment variables (.env)
 load_dotenv()
@@ -110,27 +111,25 @@ task_list = deque([])
 task_id_counter = 0
 
 
-def add_task(task: Dict):
-    task_list.append(task)
+def add_tasks(tasks: List[Node]):
+    for task in tasks:
+        task_list.append(task)
 
 
-def get_ada_embedding(text):
-    text = text.replace("\n", " ")
-    return openai.Embedding.create(input=[text], model="text-embedding-ada-002")[
-        "data"
-    ][0]["embedding"]
-
-def add_tasks(result):
+def parse_tasks(result):
     global task_id_counter
     new_tasks = result.split("\n")
+    tasks = []
     for task_name in new_tasks:
         match = re.match(r"^\d+\.", task_name) # enumerated task
         if match:
             task_name = task_name.strip().split(".", 1)
             task_name = task_name[1].strip()
-        if len(task_name) > 5: # must be more than 5 chars
+        if len(task_name) > 20: # must be more than 20 chars
             task_id_counter += 1
-            add_task({"task_id": task_id_counter, "task_name": task_name})
+            task_node = Node(task_id=task_id_counter, task_name=task_name)
+            tasks.append(task_node)
+    return tasks
 
 
 def openai_call(
@@ -179,24 +178,24 @@ def openai_call(
             break
 
 
-def task_creation_agent(
-    objective: str, result: Dict, task_description: str, task_list: List[str]
-):
+def task_creation_agent(task: Node):
+    tasks_to_do = [t.task_name for t in task_list]
     prompt = f"""
-    You are an task creation AI that uses the result of an execution agent to create new tasks with the following objective: {objective},
-    The last completed task has the result: {result}.
-    This result was based on this task description: {task_description}. These are incomplete tasks: {', '.join(task_list)}.
+    You are an task creation AI that uses the result of an execution agent to create new tasks with the following objective: {OBJECTIVE},
+    The last completed task has the result: {task.result}.
+    This result was based on this task description: {task.task_name}. These are incomplete tasks: {', '.join(tasks_to_do)}.
     Based on the result, create new tasks to be completed by the AI system that do not overlap with incomplete tasks.
     Return the tasks as a numbered list.\n"""
     response = openai_call(prompt)
     if VERBOSE:
         print(prompt, response)
-    add_tasks(response)
+    tasks = parse_tasks(response)
+    return tasks
 
 
 def prioritization_agent():
     global task_list
-    task_names = [f"{i+1}. {t['task_name']}" for i, t in enumerate(task_list)]
+    task_names = [f"{i+1}. {t.task_name}" for i, t in enumerate(task_list)]
     task_names = "\n".join(task_names)
     prompt = f"""
     You are an task prioritization AI tasked with cleaning the formatting of and reprioritizing the following tasks: {task_names}.
@@ -239,55 +238,53 @@ def context_agent(query: str, n: int):
         context = [(str(item.metadata["task"])) for item in sorted_results]
     return context 
 
-# Add the first task
-first_task = {"task_id": 1, "task_name": INITIAL_TASK}
+# Objective task
+objective_node = Node(task_id=0, task_name=OBJECTIVE)
 
-result = execution_agent(OBJECTIVE, first_task["task_name"])
+# Add the first task
+first_task = Node(task_id=1, task_name=INITIAL_TASK)
+objective_node.children = [first_task]
+
+first_task.result = execution_agent(OBJECTIVE, first_task.task_name)
 print("\033[93m\033[1m" + "\n*****INITIAL TASKS*****\n" + "\033[0m\033[0m")
-print(result)
-add_tasks(result)
+print(first_task.result)
+tasks = parse_tasks(first_task.result)
+add_tasks(tasks)
+first_task.children = tasks
 # Main loop
 while True:
     if task_list:
         # Print the task list
         print("\033[95m\033[1m" + "\n*****TASK LIST*****\n" + "\033[0m\033[0m")
         for t in task_list:
-            print(str(t["task_id"]) + ": " + t["task_name"])
+            print(str(t.task_id) + ": " + t.task_name)
 
         # Step 1: Pull the first task
         task = task_list.popleft()
         print("\033[92m\033[1m" + "\n*****NEXT TASK*****\n" + "\033[0m\033[0m")
-        print(str(task["task_id"]) + ": " + task["task_name"])
+        print(str(task.task_id) + ": " + task.task_name)
 
         # Send to execution function to complete the task based on the context
-        result = execution_agent(OBJECTIVE, task["task_name"])
-        this_task_id = int(task["task_id"])
+        task.result = execution_agent(OBJECTIVE, task.task_name)
+        
         print("\033[93m\033[1m" + "\n*****TASK RESULT*****\n" + "\033[0m\033[0m")
-        print(result)
+        print(task.result)
 
-        # Step 2: Enrich result and store in Pinecone
-        enriched_result = {
-            "data": result
-        }  # This is where you should enrich the result if needed
-        result_id = f"result_{task['task_id']}"
+        # Step 2: Store result in vector database
         if isinstance(index, DataStore):
-            index.upsert(result_id, task["task_name"], result)
+            index.upsert(task.task_id, task.task_name, task.result)
         else:
-            vector = get_ada_embedding(
-                enriched_result["data"]
-            )  # get vector of the actual result extracted from the dictionary
+            vector = get_ada_embedding(task.result)
             index.upsert(
-                [(result_id, vector, {"task": task["task_name"], "result": result})],
+                [(task.task_id, vector, {"task": task.task_name, "result": task.result})],
             namespace=OBJECTIVE
             )
 
         # Step 3: Create new tasks and reprioritize task list
-        task_creation_agent(
-            OBJECTIVE,
-            enriched_result,
-            task["task_name"],
-            [t["task_name"] for t in task_list],
-        )
+        tasks = task_creation_agent(task)
+        add_tasks(tasks)
+        task.children = tasks
+
         prioritization_agent()
 
     time.sleep(1)  # Sleep before checking the task list again

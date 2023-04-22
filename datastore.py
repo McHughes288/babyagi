@@ -1,5 +1,12 @@
-from babyagi import get_ada_embedding
 import numpy as np
+import openai
+
+
+def get_ada_embedding(text):
+    text = text.replace("\n", " ")
+    return openai.Embedding.create(input=[text], model="text-embedding-ada-002")[
+        "data"
+    ][0]["embedding"]
 
 class DataStore:
     def __init__(self, data=[], embedding_engine="text-embedding-ada-002"):

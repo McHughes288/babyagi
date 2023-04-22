@@ -3,9 +3,11 @@ import dash_cytoscape as cyto
 from graphviz import Digraph
 
 class Node:
-    def __init__(self, task, result, children=None):
-        self.task = task
+    def __init__(self, task_id, task_name, result=None, related=None, children=None):
+        self.task_id = int(task_id)
+        self.task_name = task_name
         self.result = result
+        self.related = related or []
         self.children = children or []
 
 def unpack_tree(root):
