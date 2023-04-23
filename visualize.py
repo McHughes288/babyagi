@@ -9,7 +9,7 @@ def visualize_tree_simple(root):
     dot = Digraph()
 
     def add_nodes(node):
-        dot.node(str(node), str(node.content[0:10]))
+        dot.node(str(node), str(node.task_id))
         for child in node.children:
             dot.edge(str(node), str(child))
             add_nodes(child)
@@ -23,8 +23,8 @@ def visualize_tree(root):
 
     def generate_elements(node, depth=0, parent_id=None):
         elements = []
-        node_id = f"{depth}-{node.title}"
-        elements.append({"data": {"id": node_id, "label": node.content[0:10]}})
+        node_id = f"{depth}-{node.task_id}"
+        elements.append({"data": {"id": node_id, "label": node.task_id}})
 
         if parent_id is not None:
             elements.append({"data": {"source": parent_id, "target": node_id}})
@@ -42,7 +42,7 @@ def visualize_tree(root):
             id='cytoscape',
             elements=elements,
             layout={'name': 'breadthfirst'},
-            style={'width': '400px', 'height': '500px'}
+            style={'width': '1500px', 'height': '800px'}
         )
     ])
 
