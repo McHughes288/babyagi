@@ -3,7 +3,6 @@ from dash import Dash, html, dcc
 import dash_cytoscape as cyto
 from utils import maybe_load_checkpoint
 
-import json
 from dash.dependencies import Input, Output
 
 def NamedDropdown(name, **kwargs):
@@ -47,14 +46,19 @@ def visualize_tree(root):
 
     elements = generate_elements(root)
 
-    styles = {
-        'json-output': {
+    tab_style = {'height': 'calc(98vh - 80px)'}
+    
+    def text_box_style(height="15%"):
+
+        style = {
             'overflow-y': 'scroll',
-            'height': 'calc(50% - 25px)',
-            'border': 'thin lightgrey solid'
-        },
-        'tab': {'height': 'calc(98vh - 80px)'}
-    }
+            'height': height,
+            'border': 'thin lightgrey solid',
+            'white-space': 'pre-wrap',
+            'word-wrap': 'break-word',
+            'overflow-x': 'hidden'
+        }
+        return style
 
     app.layout = html.Div([
         html.Div(className='eight columns', children=[
@@ -73,6 +77,30 @@ def visualize_tree(root):
         ]),
         html.Div(className='four columns', children=[
             dcc.Tabs(id='tabs', children=[
+                dcc.Tab(label='Content', children=[
+                    html.Div(style=tab_style, children=[
+                        html.P('Task:'),
+                        html.Pre(
+                            id='tap-node-task',
+                            style=text_box_style("60px") # 4 lines
+                        ),
+                        html.P('Result:'),
+                        html.Pre(
+                            id='tap-node-result',
+                            style=text_box_style("45%")
+                        ),
+                        html.P('state:'),
+                        html.Pre(
+                            id='tap-node-state',
+                            style=text_box_style("20px")
+                        ),
+                        html.P('Edge Content:'),
+                        html.Pre(
+                            id='tap-edge-json-output',
+                            style=text_box_style("75px") # 5 lines
+                        )
+                    ])
+                ]),
                 dcc.Tab(label='Control Panel', children=[
                     NamedDropdown(
                         name='Layout',
@@ -88,31 +116,39 @@ def visualize_tree(root):
                         clearable=False
                     ),
                 ]),
-                dcc.Tab(label='JSON', children=[
-                    html.Div(style=styles['tab'], children=[
-                        html.P('Node Object JSON:'),
-                        html.Pre(
-                            id='tap-node-json-output',
-                            style=styles['json-output']
-                        ),
-                        html.P('Edge Object JSON:'),
-                        html.Pre(
-                            id='tap-edge-json-output',
-                            style=styles['json-output']
-                        )
-                    ])
-                ])
             ]),
         ])
     ])
-    @app.callback(Output('tap-node-json-output', 'children'), [Input('cytoscape', 'tapNode')])
-    def display_tap_node(data):
-        return json.dumps(data, indent=2)
 
+    @app.callback(Output('tap-node-task', 'children'), [Input('cytoscape', 'tapNode')])
+    def display_task(data):
+        task_name = ""
+        if data:
+            task_name = data["data"].get("task_name", "")
+        return task_name
+    
+    @app.callback(Output('tap-node-result', 'children'), [Input('cytoscape', 'tapNode')])
+    def display_result(data):
+        result = ""
+        if data:
+            result = data["data"].get("result", "")
+        return result
+    
+    @app.callback(Output('tap-node-state', 'children'), [Input('cytoscape', 'tapNode')])
+    def display_state(data):
+        state = ""
+        if data:
+            state = data["data"].get("state", "")
+        return state
 
     @app.callback(Output('tap-edge-json-output', 'children'), [Input('cytoscape', 'tapEdge')])
     def display_tap_edge(data):
-        return json.dumps(data, indent=2)
+        if data:
+            source_name = data["sourceData"].get("task_name", "")
+            target_name = data["targetData"].get("task_name", "")
+            return f"- TASK: {source_name}\n- SUBTASK: {target_name}"
+        else:
+            return ""
 
 
     @app.callback(Output('cytoscape', 'layout'), [Input('dropdown-layout', 'value')])
