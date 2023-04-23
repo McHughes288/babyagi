@@ -1,7 +1,6 @@
 import argparse
 from dash import Dash, html, dcc
 import dash_cytoscape as cyto
-from graphviz import Digraph
 from utils import maybe_load_checkpoint
 
 import json
@@ -21,19 +20,6 @@ def NamedDropdown(name, **kwargs):
     )
 def DropdownOptionsList(*args):
     return [{'label': val.capitalize(), 'value': val} for val in args]
-
-def visualize_tree_simple(root):
-    """Use in a notebook to see how the nodes of the tree connect together"""
-    dot = Digraph()
-
-    def add_nodes(node):
-        dot.node(str(node), str(node.task_id))
-        for child in node.children:
-            dot.edge(str(node), str(child))
-            add_nodes(child)
-
-    add_nodes(root)
-    return dot
 
 
 def visualize_tree(root):
