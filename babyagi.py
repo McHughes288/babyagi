@@ -60,8 +60,10 @@ if ENABLE_COMMAND_LINE_ARGS:
 
     OBJECTIVE, INITIAL_TASK, OPENAI_API_MODEL, DOTENV_EXTENSIONS = parse_arguments()
 
-VERBOSE = os.getenv("VERBOSE", "")
+VERBOSE = (os.getenv("VERBOSE", "false").lower() == "true")
 CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "")
+STOP_CRITERION = os.getenv("STOP_CRITERION", "")
+SKIP_STOP_CRITERION = (os.getenv("SKIP_STOP_CRITERION", "false").lower() == "true")
 
 # Load additional environment variables for enabled extensions
 if DOTENV_EXTENSIONS:
@@ -245,7 +247,32 @@ def context_agent(query: str, n: int):
         # print(results)
         sorted_results = sorted(results.matches, key=lambda x: x.score, reverse=True)
         context = [(str(item.metadata["task"])) for item in sorted_results]
-    return context 
+    return context
+
+
+def stop_criterion_agent(task):
+    if SKIP_STOP_CRITERION:
+        return False
+    prompt = f"""
+    You are a stop criterion AI that decides if a task should be broken down further or not based on the task result.
+    Task: {task.task_name}
+    Result:\n{task.result}
+    Return "Yes" if the STOP_CRITERION is met and "No" if it is not. You only need to respond with a single word.
+    STOP_CRITERION: {STOP_CRITERION}
+    Decision:"""
+    response = openai_call(prompt)
+    if VERBOSE:
+        print(prompt, response)
+    if "no" in response.lower():
+        return False
+    elif "yes" in response.lower():
+        return True
+    else:
+        print(
+            f"Warning: stop criterion returned {response}, assuming it shouldn't be stopped..."
+        )
+        return False
+
 
 objective_node, embedded_data = maybe_load_checkpoint(CHECKPOINT_DIR)
 if embedded_data:
@@ -302,14 +329,21 @@ while True:
                 [(task.task_id, vector, {"task": task.task_name, "result": task.result})],
             namespace=OBJECTIVE
             )
+        
+        stop_status = stop_criterion_agent(task)
+        print("\033[93m\033[1m" + "\n*****STOP STATUS*****\n" + "\033[0m\033[0m")
+        print(stop_status)
 
-        # Step 3: Create new tasks and reprioritize task list
-        tasks = task_creation_agent(task)
-        add_tasks(tasks)
-        task.children = tasks
+        if not stop_status:
+            # Step 3: Create new tasks and reprioritize task list
+            tasks = task_creation_agent(task)
+            add_tasks(tasks)
+            task.children = tasks
 
-        prioritization_agent()
+            prioritization_agent()
 
         save_checkpoint(CHECKPOINT_DIR, objective_node, index._data)
+    else:
+        break
 
     time.sleep(1)  # Sleep before checking the task list again
