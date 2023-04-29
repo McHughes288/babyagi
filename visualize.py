@@ -28,7 +28,7 @@ def DropdownOptionsList(*args):
     return [{"label": val.capitalize(), "value": val} for val in args]
 
 
-def visualize_tree(root):
+def visualize_tree(checkpoint_dir):
     app = Dash(__name__)
 
     def generate_elements(node, depth=0, parent_id=None):
@@ -70,7 +70,16 @@ def visualize_tree(root):
 
         return elements, stylesheet
 
-    elements, stylesheet = generate_elements(root)
+    def get_elements_from_checkpoint(checkpoint_dir):
+        objective_node, _ = maybe_load_checkpoint(checkpoint_dir)
+        if objective_node is not None:
+            elements, stylesheet = generate_elements(objective_node)
+        else:
+            elements = []
+            stylesheet = []
+        return elements, stylesheet
+    
+    elements, stylesheet = get_elements_from_checkpoint(checkpoint_dir)
 
     stylesheet.append(
         {
@@ -103,6 +112,11 @@ def visualize_tree(root):
 
     # fmt: off
     app.layout = html.Div([
+        dcc.Interval(
+            id='interval-component',
+            interval=5*1000, # in milliseconds
+            n_intervals=0
+        ),
         html.Div(className="eight columns", children=[
             cyto.Cytoscape(
                 id="cytoscape",
@@ -200,6 +214,12 @@ def visualize_tree(root):
     @app.callback(Output("cytoscape", "layout"), [Input("dropdown-layout", "value")])
     def update_cytoscape_layout(layout):
         return {"name": layout}
+    
+    @app.callback(Output('cytoscape', 'elements'), Output('cytoscape', 'stylesheet'),
+              Input('interval-component', 'n_intervals'))
+    def update_metrics(n):
+        elements, stylesheet = get_elements_from_checkpoint(checkpoint_dir)
+        return elements, stylesheet
 
     app.run_server(debug=True)
 
@@ -209,9 +229,7 @@ def main():
     parser.add_argument("--checkpoint_dir", type=str, default="./checkpoint", help="path to checkpoint dir")
     args = parser.parse_args()
 
-    objective_node, _ = maybe_load_checkpoint(args.checkpoint_dir)
-
-    visualize_tree(objective_node)
+    visualize_tree(args.checkpoint_dir)
 
 
 if __name__ == "__main__":
